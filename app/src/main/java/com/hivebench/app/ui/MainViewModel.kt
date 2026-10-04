@@ -1014,6 +1014,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             putAll(extraEnv)
         }
+        val project = _state.value.activeProject
         val command = when (purpose) {
             com.hivebench.app.runtime.AgentLaunchPurpose.SESSION ->
                 if (kind == AgentKind.CUSTOM_RUNNER) {
@@ -1027,10 +1028,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             com.hivebench.app.runtime.AgentLaunchPurpose.API_KEY_LOGIN ->
                 listOf("/usr/bin/bash", "-lc", requireNotNull(spec.apiKeyLogin) { "${kind.title} reads its API key directly" })
         }
-        val project = _state.value.activeProject
         if (purpose == com.hivebench.app.runtime.AgentLaunchPurpose.SESSION && project != null) {
             installer.guestLaunch(
-                runtime.proot, runtime.rootfs, projectWorkspaceRoot(project), environment, command,
+                runtime.proot, runtime.rootfs, projectWorkspaceRoot(project),
+                // JCode is client/server: without its own runtime dir every terminal attaches to one shared
+                // daemon living in whichever project's proot started first. Closing that terminal killed every
+                // other JCode session, and tools ran in the wrong sandbox (read-only file system errors).
+                if (kind == AgentKind.JCODE && "JCODE_RUNTIME_DIR" !in environment) environment + jcodeRuntimeEnv("p:${project.id}") else environment,
+                command,
                 guestWorkspacePath = projectGuestRoot(project),
                 emulateHardLinks = spec.emulateHardLinks,
             )
@@ -1044,6 +1049,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** A short, per-[owner] JCode runtime dir (short because the host socket path is length-limited). */
+    private fun jcodeRuntimeEnv(owner: String): Map<String, String> {
+        val id = java.security.MessageDigest.getInstance("SHA-1").digest(owner.toByteArray())
+            .take(5).joinToString("") { "%02x".format(it) }
+        return mapOf("JCODE_RUNTIME_DIR" to "/tmp/jr/$id")
+    }
+
     // ---- Multi-agent office (hive) --------------------------------------------------
 
     /** The active project's office: god + hired agents, each a parallel CLI session. */
@@ -1053,7 +1065,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope,
             object : com.hivebench.app.hive.HiveHost {
                 override suspend fun launch(agent: com.hivebench.app.hive.HiveAgent, extraArgs: List<String>, extraEnv: Map<String, String>) =
-                    agentLaunch(agent.cli, com.hivebench.app.runtime.AgentLaunchPurpose.SESSION, extraArgs, extraEnv)
+                    agentLaunch(
+                        agent.cli, com.hivebench.app.runtime.AgentLaunchPurpose.SESSION, extraArgs,
+                        if (agent.cli == AgentKind.JCODE) jcodeRuntimeEnv("hive:${_state.value.activeProject?.id}:${agent.id}") + extraEnv else extraEnv,
+                    )
                 override fun transcriptFile(sessionId: String) = claudeTranscriptFile(sessionId)
                 override fun connectionEnv(connections: List<String>) = hiveConnectionEnv(connections)
                 override fun autoApproveTools() = _state.value.autoApproveTools
@@ -1236,7 +1251,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             entry.launched -> com.hivebench.app.runtime.AgentCatalog.spec(entry.kind).resumeArgs
             else -> emptyList()
         } + extra
-        return agentLaunch(entry.kind, com.hivebench.app.runtime.AgentLaunchPurpose.SESSION, extraArgs = args)
+        // Each JCode tab gets its own daemon so closing one tab never takes the others down.
+        val env = if (entry.kind == AgentKind.JCODE) jcodeRuntimeEnv("s:${entry.terminalKey}") else emptyMap()
+        return agentLaunch(entry.kind, com.hivebench.app.runtime.AgentLaunchPurpose.SESSION, extraArgs = args, extraEnv = env)
     }
 
     /** Call once the session's process actually started, so later starts resume it. */
