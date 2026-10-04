@@ -18,8 +18,12 @@ sealed interface AgentPackage {
     /** Installed by an existing RuntimeInstaller overlay (Claude Code, DeepSeek Harness, Antigravity). */
     data object Bundled : AgentPackage
 
-    /** Global npm package; npm links [bin] into /usr/local/bin. */
-    data class Npm(val name: String, val bin: String) : AgentPackage
+    /**
+     * Global registry package installed with bun (npm as fallback); the binary is linked
+     * into /usr/local/bin. [aliases] are former package names whose installs still count
+     * as this agent (e.g. after the package moved to a new npm scope).
+     */
+    data class Npm(val name: String, val bin: String, val aliases: List<String> = emptyList()) : AgentPackage
 
     /**
      * GitHub release tarball verified against the release's SHA256SUMS. The executable
@@ -76,7 +80,7 @@ data class AgentSpec(
     val sourceLabel: String
         get() = when (pkg) {
             AgentPackage.Bundled -> "Official build"
-            is AgentPackage.Npm -> "npm · ${pkg.name}"
+            is AgentPackage.Npm -> "bun · ${pkg.name}"
             is AgentPackage.GitHubRelease -> "GitHub · ${pkg.repo}"
             AgentPackage.UserCommand -> "Runs your own command"
         }
@@ -168,7 +172,7 @@ object AgentCatalog {
         ),
         AgentSpec(
             kind = AgentKind.PI_AGENT,
-            pkg = AgentPackage.Npm("@mariozechner/pi-coding-agent", "pi"),
+            pkg = AgentPackage.Npm("@earendil-works/pi-coding-agent", "pi", aliases = listOf("@mariozechner/pi-coding-agent")),
             launch = listOf("/usr/local/bin/pi"),
             login = null,
             loginHint = "Pi signs in from inside its session: run /login and pick Claude, ChatGPT, Copilot or Gemini.",

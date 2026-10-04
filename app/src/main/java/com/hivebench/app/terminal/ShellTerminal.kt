@@ -36,11 +36,14 @@ import com.hivebench.app.ui.theme.NeoBlack
 import com.hivebench.app.ui.theme.NeoLime
 import kotlinx.coroutines.launch
 
+/** Installs bun on first use; the Core runtime only ships Node and npm. */
+private const val EnsureBun = "command -v bun >/dev/null || npm i -g --prefix /usr/local bun &&"
+
 private val ShellShortcuts = listOf(
     TerminalQuickAction("git status", "git status\r"),
     TerminalQuickAction("ls -la", "ls -la\r"),
-    TerminalQuickAction("npm i", "npm install\r"),
-    TerminalQuickAction("npm run dev", "npm run dev\r"),
+    TerminalQuickAction("bun i", "$EnsureBun bun install\r"),
+    TerminalQuickAction("bun run dev", "$EnsureBun bun run dev\r"),
     TerminalQuickAction("clear", "clear\r"),
 )
 
@@ -62,8 +65,10 @@ fun ShellTerminal(
     val scope = rememberCoroutineScope()
     val info by TerminalSessions.info.collectAsState()
     var error by remember(sessionKey) { mutableStateOf<String?>(null) }
+    var stopped by remember(sessionKey) { mutableStateOf(false) }
 
     fun start(restart: Boolean) {
+        stopped = false
         scope.launch {
             error = runCatching {
                 if (!restart && TerminalSessions.get(sessionKey) != null) return@runCatching
@@ -74,14 +79,21 @@ fun ShellTerminal(
 
     LaunchedEffect(sessionKey) { start(restart = false) }
 
-    Column(modifier.fillMaxSize().imePadding()) {
+    Column(modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Column(Modifier.weight(1f)) {
                 Text(title, fontWeight = FontWeight.Black, fontSize = 13.sp)
                 Text(subtitle, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            }
+            if (info[sessionKey] != null) {
+                ShellButton("Stop") {
+                    TerminalSessions.close(sessionKey)
+                    stopped = true
+                }
             }
             ShellButton("Restart") { start(restart = true) }
         }
@@ -91,6 +103,9 @@ fun ShellTerminal(
                 error != null -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
                     Text("Could not start the shell", fontWeight = FontWeight.Black)
                     Text(error.orEmpty(), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                session == null && stopped -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    ShellButton("Shell stopped · Start", primary = true) { start(restart = true) }
                 }
                 session == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                 else -> {

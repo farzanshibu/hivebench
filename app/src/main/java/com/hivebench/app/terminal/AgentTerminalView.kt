@@ -106,6 +106,17 @@ fun AgentTerminalView(
                             },
                         ),
                     )
+                    setOnTouchListener { v, event ->
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                                v.parent?.requestDisallowInterceptTouchEvent(true)
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                v.parent?.requestDisallowInterceptTouchEvent(false)
+                            }
+                        }
+                        false
+                    }
                     terminalView = this
                     TerminalSessions.attach(sessionKey, this)
                 }
@@ -174,6 +185,8 @@ private fun TerminalKeyRow(
             TerminalKey("↓") { onKey(KeyEvent.KEYCODE_DPAD_DOWN, 0) }
             TerminalKey("←") { onKey(KeyEvent.KEYCODE_DPAD_LEFT, 0) }
             TerminalKey("→") { onKey(KeyEvent.KEYCODE_DPAD_RIGHT, 0) }
+            TerminalKey("PgUp") { onKey(KeyEvent.KEYCODE_PAGE_UP, 0) }
+            TerminalKey("PgDn") { onKey(KeyEvent.KEYCODE_PAGE_DOWN, 0) }
             TerminalKey("/") { onText("/") }
             TerminalKey("^C") { onText("\u0003") }
             TerminalKey("↵") { onKey(KeyEvent.KEYCODE_ENTER, 0) }

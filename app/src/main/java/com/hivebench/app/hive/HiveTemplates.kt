@@ -436,7 +436,7 @@ data class HiveConnection(val id: String, val title: String, val envVars: List<S
 
 object HiveConnections {
     val all = listOf(
-        HiveConnection("github", "GitHub", listOf("GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"), "Personal access token for gh and the GitHub MCP server"),
+        HiveConnection("github", "GitHub", listOf("GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"), "Personal access token for gh and the GitHub MCP server"),
         HiveConnection("linear", "Linear", listOf("LINEAR_API_KEY"), "Linear API key for issue sync"),
         HiveConnection("brave", "Brave Search", listOf("BRAVE_API_KEY"), "Web search for research agents"),
         HiveConnection("slack", "Slack", listOf("SLACK_BOT_TOKEN"), "Bot token for posting updates"),

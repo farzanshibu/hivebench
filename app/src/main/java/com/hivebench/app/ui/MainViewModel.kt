@@ -875,10 +875,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val environment = mapOf("TERM" to "xterm-256color", "COLORTERM" to "truecolor")
         val command = listOf("/usr/bin/bash", "-l")
         if (project != null) {
+            pruneStaleWorkspaceStubs(runtime.rootfs, keepSlug = project.slug)
             installer.guestLaunch(runtime.proot, runtime.rootfs, projectWorkspaceRoot(project), environment, command, projectGuestRoot(project))
         } else {
-            val workspace = File(getApplication<Application>().filesDir, "workspaces/terminal").apply { mkdirs() }
-            installer.guestLaunch(runtime.proot, runtime.rootfs, workspace, environment, command)
+            val filesDir = getApplication<Application>().filesDir
+            val workspace = File(filesDir, "workspaces/terminal").apply { mkdirs() }
+            syncRootWorkspaceLinks(workspace)
+            installer.guestLaunch(
+                runtime.proot, runtime.rootfs, workspace, environment, command,
+                extraBinds = listOf(File(filesDir, "workspaces") to ROOT_PROJECTS_MOUNT),
+            )
+        }
+    }
+
+    /**
+     * The home terminal's /workspace is a scratch directory, so it used to look empty while
+     * project terminals showed other projects' leftover mount stubs. Link every project into
+     * it; the real folders are reachable through [ROOT_PROJECTS_MOUNT].
+     */
+    private fun syncRootWorkspaceLinks(workspace: File) {
+        val wanted = _state.value.projects.associate { project ->
+            project.slug to buildString {
+                append(ROOT_PROJECTS_MOUNT).append('/').append(project.id)
+                if (project.rootPath.isNotBlank()) append('/').append(project.rootPath.trim('/'))
+            }
+        }
+        workspace.listFiles().orEmpty().forEach { entry ->
+            val path = entry.toPath()
+            if (Files.isSymbolicLink(path) && wanted[entry.name] != runCatching { Files.readSymbolicLink(path).toString() }.getOrNull()) {
+                runCatching { Files.delete(path) }
+            }
+        }
+        wanted.forEach { (slug, target) ->
+            val link = File(workspace, slug).toPath()
+            if (!Files.exists(link, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                runCatching { Files.createSymbolicLink(link, java.nio.file.Paths.get(target)) }
+            }
+        }
+    }
+
+    /**
+     * Project terminals only mount their own folder at /workspace/<slug>; every project opened
+     * before leaves an empty mount-point directory behind that shows up in `ls /workspace`.
+     * Removes those empty leftovers, except for projects that still have a live terminal.
+     */
+    private fun pruneStaleWorkspaceStubs(rootfs: File, keepSlug: String) {
+        val live = com.hivebench.app.terminal.TerminalSessions.runningKeys()
+        val liveSlugs = _state.value.projects
+            .filter { p -> live.any { it.startsWith("shell:${p.id}") || it.startsWith("agent:${p.id}:") || it.startsWith("hive:${p.id}:") } }
+            .map { it.slug }
+            .toSet()
+        File(rootfs, "workspace").listFiles().orEmpty().forEach { stub ->
+            if (stub.name != keepSlug && stub.name !in liveSlugs && stub.isDirectory &&
+                !Files.isSymbolicLink(stub.toPath()) && stub.list().isNullOrEmpty()
+            ) {
+                stub.delete()
+            }
         }
     }
 
@@ -1023,14 +1075,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun hiveConnectionEnv(connections: List<String>): Map<String, String> = buildMap {
         connections.mapNotNull { com.hivebench.app.hive.HiveConnections.byId(it) }.forEach { conn ->
             conn.envVars.forEach { env ->
-                val value = vault.get("hive-conn:${conn.id}") ?: if (conn.id == "linear") _state.value.linearApiKey else null
+                val value = vault.get("hive-conn:${conn.id}")
+                    ?: if (conn.id == "linear") _state.value.linearApiKey
+                    else if (conn.id == "github") getGitHubToken()
+                    else null
                 value?.takeIf { it.isNotBlank() }?.let { put(env, it) }
             }
         }
     }
 
     fun hiveConnectionConfigured(id: String): Boolean =
-        !vault.get("hive-conn:$id").isNullOrBlank() || (id == "linear" && !_state.value.linearApiKey.isNullOrBlank())
+        !vault.get("hive-conn:$id").isNullOrBlank() ||
+            (id == "linear" && !_state.value.linearApiKey.isNullOrBlank()) ||
+            (id == "github" && !getGitHubToken().isNullOrBlank())
 
     fun saveHiveConnection(id: String, secret: String) {
         if (secret.isBlank()) vault.remove("hive-conn:$id") else vault.put("hive-conn:$id", secret.trim())
@@ -1106,11 +1163,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         com.hivebench.app.terminal.TerminalSessions.close(entry.terminalKey)
     }
 
+    fun updateAgentSessionArgs(id: String, customArgs: String) {
+        saveAgentSessions(
+            _state.value.agentSessions.map { if (it.id == id) it.copy(customArgs = customArgs.trim()) else it },
+            _state.value.activeAgentSessionId,
+        )
+    }
+
+    private fun parseCliArgs(raw: String): List<String> {
+        if (raw.isBlank()) return emptyList()
+        val result = mutableListOf<String>()
+        val current = StringBuilder()
+        var inQuotes = false
+        var quoteChar = ' '
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            when {
+                (c == '\'' || c == '"') && !inQuotes -> {
+                    inQuotes = true
+                    quoteChar = c
+                }
+                inQuotes && c == quoteChar -> {
+                    inQuotes = false
+                }
+                c.isWhitespace() && !inQuotes -> {
+                    if (current.isNotEmpty()) {
+                        result.add(current.toString())
+                        current.clear()
+                    }
+                }
+                else -> current.append(c)
+            }
+            i++
+        }
+        if (current.isNotEmpty()) {
+            result.add(current.toString())
+        }
+        return result
+    }
+
     /**
      * Launch for [entry]. Claude Code sessions are pinned to their own
      * `--session-id` and resumed with `--resume` so restarting keeps the conversation.
      */
     suspend fun agentSessionLaunch(entry: com.hivebench.app.session.AgentSessionEntry): RuntimeInstaller.GuestLaunch {
+        val extra = parseCliArgs(entry.customArgs)
         val args = when {
             entry.kind == AgentKind.CLAUDE_CODE ->
                 if (entry.launched && claudeTranscriptExists(entry.resumeId)) listOf("--resume", entry.resumeId)
@@ -1118,7 +1216,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Other CLIs resume their most recent conversation (codex resume --last, opencode --continue, …).
             entry.launched -> com.hivebench.app.runtime.AgentCatalog.spec(entry.kind).resumeArgs
             else -> emptyList()
-        }
+        } + extra
         return agentLaunch(entry.kind, com.hivebench.app.runtime.AgentLaunchPurpose.SESSION, extraArgs = args)
     }
 
@@ -1501,6 +1599,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 pendingAttachments = emptyList(),
 )
         }
+    }
+
+    /** Kills every running shell, agent and office terminal belonging to the active project. */
+    fun stopProjectTerminals() {
+        val project = _state.value.activeProject ?: return
+        com.hivebench.app.terminal.TerminalSessions.closeAllWithPrefix(
+            "shell:${project.id}",
+            "agent:${project.id}:",
+            "hive:${project.id}:",
+        )
+        _state.update { it.copy(toastMessage = "Stopped all terminals for ${project.name}") }
+    }
+
+    /** Leaves the project and stops everything it was running. */
+    fun closeProjectAndStop() {
+        stopProjectTerminals()
+        closeProject()
     }
 
     fun closeReadOnlyProject() {
@@ -2332,15 +2447,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     sizeBytes = if (file.isFile) file.length() else 0,
 )
             }
-            .sortedWith(
-                compareBy<WorkspaceEntry> { entry ->
-                    val parent = if (entry.path.contains('/')) entry.path.substringBeforeLast('/') else ""
-                    parent.lowercase(java.util.Locale.ROOT)
-                }
-                .thenByDescending { it.isDirectory }
-                .thenBy { it.name.lowercase(java.util.Locale.ROOT) }
-)
             .toList()
+            .let(::flattenWorkspaceTree)
+    }
+
+    /**
+     * Orders entries depth-first: folders before files at each level (case-insensitive by
+     * name), with every folder's children emitted directly after the folder itself.
+     */
+    private fun flattenWorkspaceTree(entries: List<WorkspaceEntry>): List<WorkspaceEntry> {
+        val byParent = entries.groupBy { if (it.path.contains('/')) it.path.substringBeforeLast('/') else "" }
+        val siblingOrder = compareByDescending<WorkspaceEntry> { it.isDirectory }
+            .thenBy { it.name.lowercase(java.util.Locale.ROOT) }
+        val result = ArrayList<WorkspaceEntry>(entries.size)
+        fun visit(parent: String) {
+            byParent[parent]?.sortedWith(siblingOrder)?.forEach { child ->
+                result += child
+                if (child.isDirectory) visit(child.path)
+            }
+        }
+        visit("")
+        return result
     }
 
     private fun isClaudeRuntimeMetadata(relativePath: String): Boolean {
@@ -2867,7 +2994,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun getGitHubToken(): String? {
+    fun getGitHubToken(): String? {
         val cliToken = if (installer.isGitHubCliInstalled()) {
             runCatching {
                 val (exit, output) = runGitHubCli(listOf("auth", "token"))
@@ -2887,6 +3014,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 
     companion object {
+        private const val ROOT_PROJECTS_MOUNT = "/var/pocket-workspaces"
         private const val MINIMUM_INITIALIZATION_SCREEN_MS = 3_000L
         private const val AGENT_UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1_000L
         private const val USAGE_POLL_INTERVAL_MS = 4_000L

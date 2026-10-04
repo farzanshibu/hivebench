@@ -100,6 +100,11 @@ object TerminalSessions {
         mutableLinks.update { it - key }
     }
 
+    /** Closes every session whose key starts with one of [prefixes]. */
+    fun closeAllWithPrefix(vararg prefixes: String) {
+        entries.keys.filter { key -> prefixes.any { key.startsWith(it) } }.forEach(::close)
+    }
+
     fun write(key: String, text: String) {
         val session = entries[key]?.session ?: return
         if (!session.isRunning) return

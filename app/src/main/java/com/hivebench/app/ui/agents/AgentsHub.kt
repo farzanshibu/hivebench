@@ -602,6 +602,8 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
     var showNewSession by remember { mutableStateOf(false) }
     var confirmClose by remember { mutableStateOf<com.hivebench.app.session.AgentSessionEntry?>(null) }
 
+    var showArgsDrawer by remember { mutableStateOf(false) }
+
     fun requestClose(id: String) {
         val target = state.agentSessions.firstOrNull { it.id == id } ?: return
         if (info[target.terminalKey]?.running == true) confirmClose = target else viewModel.closeAgentSession(id)
@@ -624,7 +626,7 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
     }
     LaunchedEffect(Unit) { viewModel.refreshAgentAuth() }
 
-    Column(modifier.fillMaxSize().imePadding()) {
+    Column(modifier.fillMaxSize()) {
         SessionStrip(
             state = state,
             info = info,
@@ -652,6 +654,10 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
                     )
                 }
             }
+            if (entry != null) {
+                val hasArgs = entry.customArgs.isNotBlank()
+                SmallButton(if (hasArgs) "Args*" else "Args", primary = hasArgs) { showArgsDrawer = true }
+            }
             if (installed && key != null) {
                 spec.usageCommand?.let { command ->
                     SmallButton("Usage", primary = false, enabled = running) { TerminalSessions.write(key, "$command\r") }
@@ -659,6 +665,23 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
                 SmallButton("Restart", primary = false) { start(restart = true) }
             }
             if (entry != null) SmallButton("Close", primary = false) { requestClose(entry.id) }
+        }
+
+        if (entry != null && entry.customArgs.isNotBlank()) {
+            Row(
+                Modifier.fillMaxWidth().clickable { showArgsDrawer = true }.padding(horizontal = 14.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "args: ${entry.customArgs}",
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = NeoLime,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
 
         if (installed && agent in TRACKED_USAGE_AGENTS) {
@@ -739,6 +762,102 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
                 onOpenAgents()
             },
         )
+    }
+
+    if (showArgsDrawer && entry != null) {
+        SessionArgsDrawer(
+            session = entry,
+            isRunning = key != null && info[key]?.running == true,
+            onSave = { newArgs, restart ->
+                viewModel.updateAgentSessionArgs(entry.id, newArgs)
+                if (restart) start(restart = true)
+            },
+            onDismiss = { showArgsDrawer = false },
+        )
+    }
+}
+
+@Composable
+private fun SessionArgsDrawer(
+    session: com.hivebench.app.session.AgentSessionEntry,
+    isRunning: Boolean,
+    onSave: (String, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var args by rememberSaveable(session.id) { mutableStateOf(session.customArgs) }
+    val commonPresets = remember(session.kind) {
+        listOf(
+            "--dangerously-skip-permissions",
+            "--model",
+            "--verbose",
+        )
+    }
+
+    NeoBottomDrawer(
+        visible = true,
+        onDismiss = onDismiss,
+        initialDetent = DrawerDetent.Half,
+        allowedDetents = listOf(DrawerDetent.Half, DrawerDetent.Full),
+        title = "${session.title} arguments",
+        subtitle = "CLI flags passed when starting ${session.kind.title}",
+    ) { _, _ ->
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "Pass arguments to the agent on startup (e.g. bypass permissions, choose a model, or pass custom flags).",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = args,
+                onValueChange = { args = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = false,
+                maxLines = 3,
+                placeholder = { Text("e.g. --dangerously-skip-permissions", fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+            )
+            Text("Presets", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                commonPresets.forEach { preset ->
+                    val shape = RoundedCornerShape(8.dp)
+                    Box(
+                        Modifier.clip(shape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .border(1.dp, borderColor(), shape)
+                            .clickable {
+                                val clean = args.trim()
+                                args = if (clean.isEmpty()) preset
+                                else if (!clean.contains(preset)) "$clean $preset"
+                                else clean
+                            }
+                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                    ) {
+                        Text("+ $preset", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton(if (isRunning) "Save & Restart" else "Save & Start", primary = true) {
+                    onSave(args, true)
+                    onDismiss()
+                }
+                SmallButton("Save only", primary = false) {
+                    onSave(args, false)
+                    onDismiss()
+                }
+                if (args.isNotBlank()) {
+                    SmallButton("Clear", primary = false) {
+                        args = ""
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -279,7 +279,16 @@ class RuntimeInstaller(private val context: Context) {
         onProgress(RuntimeInstallProgress("${agent.title} is ready", 1f))
     }
 
-    private fun npmPackageJson(pkg: AgentPackage.Npm) = File(rootfs, "usr/local/lib/node_modules/${pkg.name}/package.json")
+    private fun npmPackageJson(pkg: AgentPackage.Npm): File {
+        val candidates = (listOf(pkg.name) + pkg.aliases).flatMap { name ->
+            listOf(
+                File(rootfs, "usr/local/lib/bun-global/node_modules/$name/package.json"),
+                File(rootfs, "root/.bun/install/global/node_modules/$name/package.json"),
+                File(rootfs, "usr/local/lib/node_modules/$name/package.json"),
+            )
+        }
+        return candidates.firstOrNull { it.isFile } ?: candidates.first()
+    }
 
     private fun githubAgentMarker(pkg: AgentPackage.GitHubRelease) = File(rootfs, ".pocket-${pkg.bin}-version")
 
@@ -308,24 +317,95 @@ class RuntimeInstaller(private val context: Context) {
         check(version == "latest" || version.matches(Regex("[0-9A-Za-z.+-]+"))) { "Invalid ${agent.title} version" }
         writeResolver()
         removeLegacyAgentStub(pkg.bin)
+        val bunReady = ensureBun(runtime, onProgress)
         onProgress(RuntimeInstallProgress("Installing ${agent.title}", 0.1f, indeterminate = true))
-        // The runtime's npm prefix (/usr/local/lib/nodejs) is not on PATH; install
-        // into /usr/local so the agent lands in /usr/local/bin. Clearing the cache
-        // afterwards matters on phones: it can be as large as the agent itself.
-        runGuestCommand(
-            proot = runtime.proot,
-            command = "npm install -g --prefix /usr/local --no-audit --no-fund --omit=dev ${pkg.name}@$version" +
-                "; status=\$?; rm -rf /root/.npm/_cacache; exit \$status",
-            displayCommand = "npm install -g ${pkg.name}@$version",
-            fraction = 0.5f,
-            timeoutMs = 20 * 60 * 1_000L,
-            onProgress = onProgress,
-            failureMessage = "${agent.title} could not be installed",
-        )
+        var installedWithBun = false
+        if (bunReady) {
+            try {
+                // bun links the binary into /usr/local/bin (BUN_INSTALL_BIN) and replaces an
+                // existing link. copyfile keeps files independent of bun's cache, which is
+                // cleared afterwards (PRoot's hard-link emulation would leave dangling links).
+                runGuestCommand(
+                    proot = runtime.proot,
+                    command = "bun add -g --trust --backend=copyfile --no-progress ${pkg.name}@$version" +
+                        "; status=\$?; rm -rf /root/.bun/install/cache; exit \$status",
+                    displayCommand = "bun add -g ${pkg.name}@$version",
+                    fraction = 0.5f,
+                    timeoutMs = 20 * 60 * 1_000L,
+                    onProgress = onProgress,
+                    failureMessage = "${agent.title} could not be installed",
+                )
+                installedWithBun = npmPackageJson(pkg).isFile
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                android.util.Log.w("RuntimeInstaller", "bun could not install ${pkg.name}; falling back to npm", error)
+            }
+        }
+        if (!installedWithBun) {
+            // The runtime's npm prefix (/usr/local/lib/nodejs) is not on PATH; install
+            // into /usr/local so the agent lands in /usr/local/bin. Clearing the cache
+            // afterwards matters on phones: it can be as large as the agent itself.
+            runGuestCommand(
+                proot = runtime.proot,
+                command = "npm install -g --prefix /usr/local --no-audit --no-fund --omit=dev ${pkg.name}@$version" +
+                    "; status=\$?; rm -rf /root/.npm/_cacache; exit \$status",
+                displayCommand = "npm install -g ${pkg.name}@$version",
+                fraction = 0.5f,
+                timeoutMs = 20 * 60 * 1_000L,
+                onProgress = onProgress,
+                failureMessage = "${agent.title} could not be installed",
+            )
+        } else {
+            removeSupersededNpmCopies(pkg)
+        }
         check(npmPackageJson(pkg).isFile) { "${agent.title} installation is incomplete" }
         if (version != "latest") {
             val installed = runCatching { JSONObject(npmPackageJson(pkg).readText()).getString("version") }.getOrNull()
             check(installed == version) { "${agent.title} is still at ${installed ?: "an unknown version"} after updating to $version" }
+        }
+    }
+
+    /** The bun executable inside the runtime, if one is installed. */
+    private fun bunBinary(): File? = listOf("usr/local/bin/bun", "root/.bun/bin/bun")
+        .map { File(rootfs, it) }
+        .firstOrNull { it.canExecute() }
+
+    /**
+     * Makes sure bun exists in the runtime. The Core bundle only ships Node and npm, so bun
+     * is bootstrapped once from the registry. Returns false when that fails and callers
+     * should fall back to npm.
+     */
+    private suspend fun ensureBun(
+        runtime: InstalledRuntime,
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ): Boolean {
+        if (bunBinary() != null) return true
+        return try {
+            onProgress(RuntimeInstallProgress("Installing Bun", 0.05f, indeterminate = true))
+            runGuestCommand(
+                proot = runtime.proot,
+                command = "npm install -g --prefix /usr/local --no-audit --no-fund --omit=dev bun" +
+                    "; status=\$?; rm -rf /root/.npm/_cacache; exit \$status",
+                displayCommand = "npm install -g bun",
+                fraction = 0.08f,
+                timeoutMs = 10 * 60 * 1_000L,
+                onProgress = onProgress,
+                failureMessage = "Bun could not be installed",
+            )
+            bunBinary() != null
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            android.util.Log.w("RuntimeInstaller", "Bun bootstrap failed; using npm", error)
+            false
+        }
+    }
+
+    /** After a successful bun install, drops the same package's older npm-installed copies. */
+    private fun removeSupersededNpmCopies(pkg: AgentPackage.Npm) {
+        (listOf(pkg.name) + pkg.aliases).forEach { name ->
+            File(rootfs, "usr/local/lib/node_modules/$name").takeIf { it.isDirectory }?.deleteRecursively()
         }
     }
 
@@ -1805,6 +1885,7 @@ class RuntimeInstaller(private val context: Context) {
         guestCommand: List<String>,
         guestWorkspacePath: String = "/workspace",
         emulateHardLinks: Boolean = true,
+        extraBinds: List<Pair<File, String>> = emptyList(),
     ): GuestLaunch {
         check(ensureRootfsCompatibilityLinks()) { "Core runtime has an invalid Linux filesystem layout" }
         require(
@@ -1843,6 +1924,12 @@ class RuntimeInstaller(private val context: Context) {
             add("${workspace.absolutePath}:$guestWorkspacePath")
             add("-b")
             add("${bridge.absolutePath}:/pocket-bridge")
+            extraBinds.forEach { (host, guest) ->
+                host.mkdirs()
+                File(rootfs, guest.removePrefix("/")).mkdirs()
+                add("-b")
+                add("${host.absolutePath}:$guest")
+            }
             add("-w")
             add(guestWorkspacePath)
             addAll(guestCommand)
@@ -1853,7 +1940,11 @@ class RuntimeInstaller(private val context: Context) {
             environment = buildMap {
                 put("HOME", "/root")
                 val androidReady = File(rootfs, "root/.pocket-android-tools-version").readTextOrNull() == ANDROID_TOOLS_VERSION
-                val basePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                val basePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.bun/bin"
+                // Global bun packages live under /usr/local like npm's, so their binaries
+                // land on PATH and agent launch paths (/usr/local/bin/<agent>) stay valid.
+                put("BUN_INSTALL_BIN", "/usr/local/bin")
+                put("BUN_INSTALL_GLOBAL_DIR", "/usr/local/lib/bun-global")
                 if (androidReady) {
                     put("ANDROID_HOME", "/root/android-sdk")
                     put("ANDROID_SDK_ROOT", "/root/android-sdk")

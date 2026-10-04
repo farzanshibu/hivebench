@@ -88,6 +88,7 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
@@ -354,6 +355,8 @@ fun HivebenchApp(viewModel: MainViewModel = viewModel()) {
                 }
             },
             onBack = viewModel::closeProject,
+            onStopTerminals = viewModel::stopProjectTerminals,
+            onCloseAndStop = viewModel::closeProjectAndStop,
             onRefreshFiles = viewModel::refreshProjectFiles,
             onOpenFile = viewModel::openFile,
             onCloseFile = viewModel::closeFile,
@@ -2630,6 +2633,8 @@ private fun WorkspaceScreen(
     /** Project shell (real PTY), kept alive across tab switches. */
     terminalContent: @Composable () -> Unit = {},
     onBack: () -> Unit,
+    onStopTerminals: () -> Unit = {},
+    onCloseAndStop: () -> Unit = {},
     onRefreshFiles: () -> Unit,
     onOpenFile: (WorkspaceEntry) -> Unit,
     onCloseFile: () -> Unit,
@@ -2827,6 +2832,27 @@ private fun WorkspaceScreen(
                                 PulsingDot(color = NeoBlack, size = 4.dp)
                                 Text("$liveCount", fontSize = 9.sp, fontWeight = FontWeight.Black, color = NeoBlack)
                             }
+                        }
+                    }
+                    var projectMenuOpen by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { projectMenuOpen = true }) { Icon(Icons.Default.MoreVert, "Project menu") }
+                        DropdownMenu(expanded = projectMenuOpen, onDismissRequest = { projectMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Close project") },
+                                leadingIcon = { Icon(Icons.Default.Close, null) },
+                                onClick = { projectMenuOpen = false; onBack() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Stop all terminals") },
+                                leadingIcon = { Icon(Icons.Default.Stop, null) },
+                                onClick = { projectMenuOpen = false; onStopTerminals() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Close & stop everything") },
+                                leadingIcon = { Icon(Icons.Default.Close, null, tint = MaterialTheme.colorScheme.error) },
+                                onClick = { projectMenuOpen = false; onCloseAndStop() },
+                            )
                         }
                     }
                 },

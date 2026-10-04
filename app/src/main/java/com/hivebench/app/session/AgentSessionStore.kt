@@ -21,6 +21,8 @@ data class AgentSessionEntry(
     val resumeId: String = UUID.randomUUID().toString(),
     /** True once the TUI has been launched at least once (so later launches resume). */
     val launched: Boolean = false,
+    /** Custom CLI arguments to pass to the agent (e.g. `--dangerously-skip-permissions`). */
+    val customArgs: String = "",
 ) {
     val terminalKey: String get() = "agent:$projectId:$id"
 }
@@ -47,6 +49,7 @@ class AgentSessionStore(filesDir: File) {
                     createdAt = o.optLong("createdAt"),
                     resumeId = o.optString("resumeId").ifBlank { UUID.randomUUID().toString() },
                     launched = o.optBoolean("launched"),
+                    customArgs = o.optString("customArgs", ""),
                 )
             }
         }.getOrDefault(emptyList())
@@ -62,7 +65,8 @@ class AgentSessionStore(filesDir: File) {
                     .put("title", s.title)
                     .put("createdAt", s.createdAt)
                     .put("resumeId", s.resumeId)
-                    .put("launched", s.launched),
+                    .put("launched", s.launched)
+                    .put("customArgs", s.customArgs),
             )
         }
         val target = file(projectId)

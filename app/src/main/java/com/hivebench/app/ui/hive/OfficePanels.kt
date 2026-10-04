@@ -582,8 +582,35 @@ private fun CheckRow(title: String, subtitle: String, checked: Boolean, onChange
 private fun ConnectionDrawer(id: String, viewModel: MainViewModel, onDismiss: () -> Unit) {
     val conn = HiveConnections.byId(id) ?: return
     var secret by remember { mutableStateOf("") }
+    val sharedToken = if (id == "github") viewModel.getGitHubToken() else null
+    val hasShared = !sharedToken.isNullOrBlank()
+
     NeoBottomDrawer(visible = true, onDismiss = onDismiss, initialDetent = DrawerDetent.Half, title = conn.title, subtitle = "Exported to granted agents as ${conn.envVars.joinToString()}") { _, _ ->
-        OutlinedTextField(secret, { secret = it }, Modifier.fillMaxWidth(), label = { Text("Token / key") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+        if (hasShared) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(LiveGreen.copy(alpha = 0.15f))
+                    .border(1.dp, LiveGreen, RoundedCornerShape(8.dp))
+                    .padding(10.dp),
+            ) {
+                Text(
+                    "Connected via app GitHub login. Agents automatically inherit this token unless overridden below.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        OutlinedTextField(
+            secret,
+            { secret = it },
+            Modifier.fillMaxWidth(),
+            label = { Text(if (hasShared) "Override token / key" else "Token / key") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+        )
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SmallBtn("Save", primary = true, enabled = secret.isNotBlank()) { viewModel.saveHiveConnection(id, secret); onDismiss() }
