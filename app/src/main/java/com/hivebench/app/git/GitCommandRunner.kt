@@ -46,9 +46,21 @@ class GitCommandRunner(
 
         val fullCommand = buildList {
             add("git")
+            // Without this, `git pull` on diverged branches aborts asking how to reconcile.
+            add("-c"); add("pull.rebase=false")
             if (!authToken.isNullOrBlank()) {
-                add("-c")
-                add("http.extraheader=Authorization: Bearer $authToken")
+                // GitHub's git HTTPS endpoint only accepts Basic auth (Bearer is rejected),
+                // scoped to github.com so other remotes never see the token.
+                val basic = android.util.Base64.encodeToString(
+                    "x-access-token:$authToken".toByteArray(),
+                    android.util.Base64.NO_WRAP,
+                )
+                add("-c"); add("http.https://github.com/.extraheader=Authorization: Basic $basic")
+                // Disable credential helpers for this call so they cannot add a conflicting header.
+                add("-c"); add("credential.helper=")
+                // No SSH keys exist in the runtime; route SSH-style GitHub remotes over HTTPS.
+                add("-c"); add("url.https://github.com/.insteadOf=git@github.com:")
+                add("-c"); add("url.https://github.com/.insteadOf=ssh://git@github.com/")
             }
             addAll(gitArgs)
         }
@@ -64,7 +76,12 @@ class GitCommandRunner(
                 outputFile = outputFile,
             )
 
-            val exitCode = process.waitFor()
+            val finished = process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroy()
+                return@withContext GitExecResult(-1, "", "git ${gitArgs.firstOrNull().orEmpty()} timed out after ${timeoutMs / 1000}s")
+            }
+            val exitCode = process.exitValue()
             val output = if (outputFile.isFile) outputFile.readText() else ""
             GitExecResult(
                 exitCode = exitCode,

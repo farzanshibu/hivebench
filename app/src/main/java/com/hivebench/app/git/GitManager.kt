@@ -359,8 +359,15 @@ class GitManager(
         branch: String? = null,
         token: String? = null,
     ): Result<String> {
+        // A pull that needs a merge commit fails without an identity; cloned repos often have none.
+        val name = runner.execute(workspace, guestPath, listOf("config", "user.name"))
+        if (!name.isSuccess || name.stdout.isBlank()) {
+            runner.execute(workspace, guestPath, listOf("config", "user.name", "Hivebench User"))
+            runner.execute(workspace, guestPath, listOf("config", "user.email", "harness@mobile.internal"))
+        }
         val args = buildList {
             add("pull")
+            add("--no-edit")
             add(remote)
             if (!branch.isNullOrBlank()) add(branch)
         }

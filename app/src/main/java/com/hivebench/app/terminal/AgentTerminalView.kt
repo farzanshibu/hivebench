@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -84,7 +85,10 @@ fun AgentTerminalView(
     var fontPx by remember { mutableStateOf(with(density) { 12.sp.toPx() }) }
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
 
-    Column(modifier.background(TerminalBackground)) {
+    // The activity is edge-to-edge, so adjustResize no longer shrinks the window: pad by the
+    // IME inset ourselves so the prompt and the extra-keys row sit right above the keyboard.
+    // imePadding consumes the inset, so ancestors that already apply it don't double up.
+    Column(modifier.background(TerminalBackground).imePadding()) {
         AndroidView(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             factory = { context ->

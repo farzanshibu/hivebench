@@ -254,6 +254,16 @@ private fun AgentCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                state.agentDefaultArgs[agent.stableId]?.let { args ->
+                    Text(
+                        "args: $args",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = NeoLime,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             } else {
                 Text("Not installed · ${spec.sourceLabel}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -356,6 +366,12 @@ private fun AgentDetailSheet(
                 CustomRunnerSection(state.customRunnerCommand, viewModel::setCustomRunnerCommand)
             }
 
+            LaunchArgsSection(
+                agent = agent,
+                saved = state.agentDefaultArgs[agent.stableId].orEmpty(),
+                onSave = { viewModel.setAgentDefaultArgs(agent, it) },
+            )
+
             if (spec.supportsAccountLogin) {
                 SectionLabel("Account")
                 val status = when (auth?.account) {
@@ -410,6 +426,74 @@ private fun SectionLabel(text: String) {
         else -> com.hivebench.app.ui.theme.NeoPurple
     }
     com.hivebench.app.ui.theme.SectionHeader(text, color)
+}
+
+/** Common startup flags per agent, offered as one-tap chips. */
+private fun argPresets(kind: AgentKind): List<String> = when (kind) {
+    AgentKind.CLAUDE_CODE -> listOf("--dangerously-skip-permissions", "--model opus", "--model sonnet", "--verbose")
+    AgentKind.CODEX -> listOf("--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--model gpt-5")
+    AgentKind.OPENCODE -> listOf("--model", "--print-logs")
+    AgentKind.JCODE -> listOf("--model", "--provider")
+    else -> listOf("--model", "--verbose")
+}
+
+@Composable
+private fun ArgsEditor(kind: AgentKind, args: String, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = args,
+        onValueChange = onChange,
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = false,
+        maxLines = 3,
+        placeholder = { Text(argPresets(kind).first(), fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+    )
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        argPresets(kind).forEach { preset ->
+            val shape = RoundedCornerShape(8.dp)
+            Box(
+                Modifier.clip(shape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, borderColor(), shape)
+                    .clickable {
+                        val clean = args.trim()
+                        onChange(
+                            when {
+                                clean.isEmpty() -> preset
+                                clean.contains(preset) -> clean
+                                else -> "$clean $preset"
+                            },
+                        )
+                    }
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            ) {
+                Text("+ $preset", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LaunchArgsSection(agent: AgentKind, saved: String, onSave: (String) -> Unit) {
+    var draft by rememberSaveable(agent, saved) { mutableStateOf(saved) }
+    SectionLabel("Launch args")
+    Text(
+        "Flags added every time ${agent.title} starts, in every project and session. Per-session args (Args button on the Session tab) are added after these.",
+        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    ArgsEditor(agent, draft) { draft = it }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        SmallButton("Save args", primary = true, enabled = draft.trim() != saved) { onSave(draft) }
+        if (saved.isNotBlank() || draft.isNotBlank()) {
+            SmallButton("Clear", primary = false) {
+                draft = ""
+                onSave("")
+            }
+        }
+    }
 }
 
 @Composable
@@ -767,6 +851,7 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
     if (showArgsDrawer && entry != null) {
         SessionArgsDrawer(
             session = entry,
+            agentDefaults = state.agentDefaultArgs[entry.kind.stableId].orEmpty(),
             isRunning = key != null && info[key]?.running == true,
             onSave = { newArgs, restart ->
                 viewModel.updateAgentSessionArgs(entry.id, newArgs)
@@ -780,18 +865,12 @@ fun AgentSessionTab(state: AppUiState, viewModel: MainViewModel, onOpenAgents: (
 @Composable
 private fun SessionArgsDrawer(
     session: com.hivebench.app.session.AgentSessionEntry,
+    agentDefaults: String,
     isRunning: Boolean,
     onSave: (String, Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var args by rememberSaveable(session.id) { mutableStateOf(session.customArgs) }
-    val commonPresets = remember(session.kind) {
-        listOf(
-            "--dangerously-skip-permissions",
-            "--model",
-            "--verbose",
-        )
-    }
 
     NeoBottomDrawer(
         visible = true,
@@ -802,45 +881,23 @@ private fun SessionArgsDrawer(
         subtitle = "CLI flags passed when starting ${session.kind.title}",
     ) { _, _ ->
         Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp),
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "Pass arguments to the agent on startup (e.g. bypass permissions, choose a model, or pass custom flags).",
+                "Flags for this session only (e.g. bypass permissions or choose a model).",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedTextField(
-                value = args,
-                onValueChange = { args = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = false,
-                maxLines = 3,
-                placeholder = { Text("e.g. --dangerously-skip-permissions", fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
-            )
-            Text("Presets", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                commonPresets.forEach { preset ->
-                    val shape = RoundedCornerShape(8.dp)
-                    Box(
-                        Modifier.clip(shape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .border(1.dp, borderColor(), shape)
-                            .clickable {
-                                val clean = args.trim()
-                                args = if (clean.isEmpty()) preset
-                                else if (!clean.contains(preset)) "$clean $preset"
-                                else clean
-                            }
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
-                    ) {
-                        Text("+ $preset", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    }
-                }
+            if (agentDefaults.isNotBlank()) {
+                Text(
+                    "Always added (Agents tab): $agentDefaults",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = NeoLime,
+                )
             }
+            ArgsEditor(session.kind, args) { args = it }
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SmallButton(if (isRunning) "Save & Restart" else "Save & Start", primary = true) {

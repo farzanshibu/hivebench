@@ -75,6 +75,18 @@ class AppPreferences(private val context: Context) {
         get() = preferences.getString("custom_runner_command", "") ?: ""
         set(value) { preferences.edit().putString("custom_runner_command", value).apply() }
 
+    /** Default CLI flags added to every session of each agent, keyed by [AgentKind.stableId]. */
+    fun loadAgentDefaultArgs(): Map<String, String> = runCatching {
+        val obj = org.json.JSONObject(preferences.getString("agent_default_args", "{}") ?: "{}")
+        obj.keys().asSequence().associateWith { obj.optString(it) }.filterValues(String::isNotBlank)
+    }.getOrDefault(emptyMap())
+
+    fun saveAgentDefaultArgs(args: Map<String, String>) {
+        val obj = org.json.JSONObject()
+        args.filterValues(String::isNotBlank).forEach { (k, v) -> obj.put(k, v) }
+        preferences.edit().putString("agent_default_args", obj.toString()).apply()
+    }
+
     /** Models last discovered per provider, so pickers outside provider settings can list them. */
     fun loadDiscoveredModels(): Map<ProviderKind, List<DiscoveredModel>> =
         ProviderKind.entries.mapNotNull { kind ->

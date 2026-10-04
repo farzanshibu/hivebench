@@ -222,6 +222,8 @@ data class AppUiState(
     val githubRepoOverride: String? = null,
     val autoApproveTools: Boolean = false,
     val customRunnerCommand: String = "",
+    /** Default launch flags per agent ([AgentKind.stableId] to raw args), applied to every session. */
+    val agentDefaultArgs: Map<String, String> = emptyMap(),
     /** Parallel agent TUI sessions of the active project (see [com.hivebench.app.session.AgentSessionStore]). */
     val agentSessions: List<com.hivebench.app.session.AgentSessionEntry> = emptyList(),
     val activeAgentSessionId: String? = null,
@@ -272,6 +274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.toSet() + DevStack.WEB,
             autoApproveTools = preferences.autoApproveTools,
             customRunnerCommand = preferences.customRunnerCommand,
+            agentDefaultArgs = preferences.loadAgentDefaultArgs(),
             discoveredModels = preferences.loadDiscoveredModels(),
 ),
 )
@@ -1170,6 +1173,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /** Saves flags passed to every new and restarted session of [kind]. */
+    fun setAgentDefaultArgs(kind: AgentKind, args: String) {
+        val clean = args.trim()
+        val updated = _state.value.agentDefaultArgs.toMutableMap().apply {
+            if (clean.isEmpty()) remove(kind.stableId) else put(kind.stableId, clean)
+        }
+        preferences.saveAgentDefaultArgs(updated)
+        _state.update {
+            it.copy(
+                agentDefaultArgs = updated,
+                toastMessage = if (clean.isEmpty()) "${kind.title} default args cleared" else "${kind.title} default args saved",
+            )
+        }
+    }
+
     private fun parseCliArgs(raw: String): List<String> {
         if (raw.isBlank()) return emptyList()
         val result = mutableListOf<String>()
@@ -1208,7 +1226,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * `--session-id` and resumed with `--resume` so restarting keeps the conversation.
      */
     suspend fun agentSessionLaunch(entry: com.hivebench.app.session.AgentSessionEntry): RuntimeInstaller.GuestLaunch {
-        val extra = parseCliArgs(entry.customArgs)
+        // Agent-wide defaults first, then this session's own flags (which win for repeated options).
+        val extra = parseCliArgs(_state.value.agentDefaultArgs[entry.kind.stableId].orEmpty()) + parseCliArgs(entry.customArgs)
         val args = when {
             entry.kind == AgentKind.CLAUDE_CODE ->
                 if (entry.launched && claudeTranscriptExists(entry.resumeId)) listOf("--resume", entry.resumeId)
@@ -2765,7 +2784,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 result.onSuccess {
                     _state.update { it.copy(toastMessage = "Pushed branch '$branch' to remote") }
                 }.onFailure { error ->
-                    _state.update { it.copy(toastMessage = "Push failed: ${error.message?.lineSequence()?.lastOrNull()?.take(160)}") }
+                    _state.update { it.copy(toastMessage = "Push failed: ${gitErrorSummary(error.message)}") }
                 }
             }
             refreshGitState()
@@ -2783,7 +2802,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 result.onSuccess {
                     _state.update { it.copy(toastMessage = "Pulled updates for '$branch'") }
                 }.onFailure { error ->
-                    _state.update { it.copy(toastMessage = "Pull failed: ${error.message?.lineSequence()?.lastOrNull()?.take(160)}") }
+                    _state.update { it.copy(toastMessage = "Pull failed: ${gitErrorSummary(error.message)}") }
                 }
             }
             refreshGitState()
@@ -3008,6 +3027,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    /** Picks the most useful line of git output (fatal/error/hint) instead of the last, often blank or noise, line. */
+    private fun gitErrorSummary(message: String?): String {
+        val lines = sanitizeTerminalOutput(message.orEmpty()).lineSequence().map(String::trim).filter(String::isNotBlank).toList()
+        val line = lines.firstOrNull { it.startsWith("fatal:") || it.startsWith("error:") || it.startsWith("remote: Permission") || it.contains("rejected") }
+            ?: lines.lastOrNull()
+            ?: "unknown error"
+        return line.take(200)
     }
 
     fun getGitHubToken(): String? {

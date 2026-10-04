@@ -471,7 +471,11 @@ private fun GitChangesTab(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.clip(RoundedCornerShape(8.dp)).clickable { amendCommit = !amendCommit }.padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
                             Checkbox(
                                 checked = amendCommit,
                                 onCheckedChange = { amendCommit = it },
@@ -1033,7 +1037,11 @@ private fun CreateBranchDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(8.dp)).clickable { checkout = !checkout }.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
                     Checkbox(
                         checked = checkout,
                         onCheckedChange = { checkout = it },
