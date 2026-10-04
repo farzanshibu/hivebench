@@ -1984,6 +1984,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 "--hostname", "github.com",
 "--git-protocol", "https",
 "--web",
+"--scopes", "workflow",
 "--insecure-storage",
 ),
                         guestWorkspacePath = "/workspace/github-auth",
@@ -2028,7 +2029,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         githubAuthProcess = null
                         outputFile.delete()
                     }
-                    githubAccountLogin() ?: error("GitHub connected, but the account could not be identified")
+                    val login = githubAccountLogin() ?: error("GitHub connected, but the account could not be identified")
+                    ensureGitCredentialHelper()
+                    login
                 }
             }
             result.onSuccess { login ->
@@ -2142,6 +2145,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             preferences.githubLogin = ""
             _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.DISCONNECTED, githubLogin = null) }
         } else {
+            ensureGitCredentialHelper()
             preferences.githubLogin = login
             _state.update {
                 it.copy(
@@ -2160,6 +2164,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // credential in Hivebench's private Linux home instead of exporting it.
 "BROWSER" to "/bin/false",
 )
+
+    /**
+     * Registers gh as git's credential helper in the guest's global gitconfig so every
+     * project workspace (and every agent session) pushes/pulls with the same token
+     * that was used to clone. Idempotent, safe to call on every connection refresh.
+     */
+    private fun ensureGitCredentialHelper() {
+        runCatching {
+            val (exit, output) = runGitHubCli(listOf("auth", "setup-git", "--hostname", "github.com"))
+            if (exit != 0) android.util.Log.w("Hivebench", "gh auth setup-git failed: ${output.takeLast(300)}")
+        }.onFailure { android.util.Log.w("Hivebench", "gh auth setup-git failed", it) }
+    }
 
     private fun runGitHubCli(arguments: List<String>): Pair<Int, String> {
         check(installer.isGitHubCliInstalled()) { "GitHub CLI is not installed" }
