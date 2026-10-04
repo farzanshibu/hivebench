@@ -27,6 +27,12 @@ class BrowserSession internal constructor(val projectKey: String) {
     var activeUrl by mutableStateOf<String?>(null)
     var isLoading by mutableStateOf(false)
     var canGoBack by mutableStateOf(false)
+    var canGoForward by mutableStateOf(false)
+    var progress by mutableStateOf(0)
+    var pageTitle by mutableStateOf("")
+
+    /** Main-frame load failure (connection refused, DNS, …); null while the page is fine. */
+    var loadError by mutableStateOf<String?>(null)
     internal var tool by mutableStateOf(BrowserTool.NONE)
     var currentTab by mutableStateOf(BrowserInspectorTab.PREVIEW)
 
@@ -51,6 +57,12 @@ class BrowserSession internal constructor(val projectKey: String) {
         consoleLogs.clear()
         networkRequests.clear()
         selectedElement = null
+        loadError = null
+    }
+
+    /** Detaches the WebView from its Compose host without destroying it, so the page survives tab switches. */
+    internal fun detachWebView() {
+        webView?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
     }
 
     /**

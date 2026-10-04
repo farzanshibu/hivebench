@@ -1,7 +1,10 @@
 package com.hivebench.app.browser
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
@@ -35,16 +38,22 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NearMe
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Web
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -58,14 +67,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -77,6 +89,7 @@ import com.hivebench.app.ui.neo.CircularProgressIndicator
 import com.hivebench.app.ui.neo.HorizontalDivider
 import com.hivebench.app.ui.neo.Icon
 import com.hivebench.app.ui.neo.IconButton
+import com.hivebench.app.ui.neo.LinearProgressIndicator
 import com.hivebench.app.ui.neo.MaterialTheme
 import com.hivebench.app.ui.neo.OutlinedTextField
 import com.hivebench.app.ui.neo.OutlinedTextFieldDefaults
@@ -125,6 +138,7 @@ fun BrowserInspectionScreen(
     onSaveCapture: (Bitmap) -> String? = { null },
 ) {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val session = remember(projectKey) { BrowserSessions.obtain(projectKey) }
     var pushPayload by remember { mutableStateOf<BrowserPushPayload?>(null) }
     var drawColor by remember { mutableStateOf(DrawColors.first()) }
@@ -152,10 +166,11 @@ fun BrowserInspectionScreen(
 
     // A dev server found (or restarted on a new port) while the tab is open loads once;
     // manual navigation afterwards is left alone.
+    // In external mode nothing launches by itself; the user taps "Open in browser".
     LaunchedEffect(url, ready) {
         if (ready && url != null && url != session.autoLoadedUrl) {
             session.autoLoadedUrl = url
-            load(url)
+            if (BrowserOpenMode.load(context) == BrowserOpenMode.IN_APP) load(url) else session.address = url
         }
     }
 
@@ -163,14 +178,46 @@ fun BrowserInspectionScreen(
         session.webView?.evaluateJavascript(BrowserInspectorBridge.setInspectModeScript(session.tool == BrowserTool.INSPECT), null)
     }
 
-    // Back walks the page's own history before leaving the workspace.
-    BackHandler(enabled = session.canGoBack && session.currentTab == BrowserInspectorTab.PREVIEW) {
+    var openMode by remember { mutableStateOf(BrowserOpenMode.load(context)) }
+    fun setMode(mode: BrowserOpenMode) {
+        openMode = mode
+        BrowserOpenMode.save(context, mode)
+    }
+
+    // Back walks the page's own history before leaving the workspace (in-app mode only;
+    // in external mode the WebView is hidden, so Back must not silently navigate it).
+    BackHandler(
+        enabled = openMode == BrowserOpenMode.IN_APP && session.canGoBack &&
+            session.currentTab == BrowserInspectorTab.PREVIEW,
+    ) {
+        session.loadError = null
         session.webView?.goBack()
     }
 
-    val navigate = {
-        val normalized = normalizeUrl(session.address)
-        if (normalized.isNotBlank()) load(normalized)
+    /** Opens [target] in the user's default browser (the dev server is on-device, so 127.0.0.1 works there too). */
+    fun openExternal(target: String?) {
+        val resolved = target?.let(::normalizeUrl)?.takeIf { it.isNotBlank() }
+        if (resolved == null) {
+            Toast.makeText(context, "No URL to open yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(resolved))
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(intent) }
+            .onFailure { Toast.makeText(context, "No browser app found", Toast.LENGTH_SHORT).show() }
+    }
+
+    /** Opens [target] according to the chosen mode. */
+    fun open(target: String) {
+        val normalized = normalizeUrl(target)
+        if (normalized.isBlank()) return
+        if (openMode == BrowserOpenMode.EXTERNAL) {
+            session.address = normalized
+            openExternal(normalized)
+        } else {
+            load(normalized)
+        }
     }
 
     fun pageSnapshot(): BrowserPushPayload {
@@ -215,54 +262,98 @@ fun BrowserInspectionScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        // ---- Address bar + tools ----
+        // ---- Toolbar: navigation, address, open mode ----
+        val externalMode = openMode == BrowserOpenMode.EXTERNAL
+        val liveUrl = url?.takeIf { ready }
         Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().border(1.dp, borderColor)) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (!externalMode) {
+                        NavButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", enabled = session.canGoBack, borderColor = borderColor) { session.webView?.goBack() }
+                        NavButton(Icons.AutoMirrored.Filled.ArrowForward, "Forward", enabled = session.canGoForward, borderColor = borderColor) { session.webView?.goForward() }
+                    }
                     OutlinedTextField(
                         value = session.address,
                         onValueChange = { session.address = it },
                         modifier = Modifier.weight(1f),
                         singleLine = true,
-                        placeholder = { Text("localhost:3000 or URL", fontSize = 12.sp) },
-                        shape = RoundedCornerShape(8.dp),
+                        placeholder = { Text("localhost:3000 or any URL", fontSize = 12.sp) },
+                        shape = RoundedCornerShape(10.dp),
                         leadingIcon = {
-                            if (session.isLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = NeoLime)
-                            else Icon(Icons.Default.Language, null, Modifier.size(16.dp), tint = NeoLime)
+                            when {
+                                session.isLoading && !externalMode -> CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = NeoLime)
+                                session.address.startsWith("https://") -> Icon(Icons.Default.Lock, null, Modifier.size(15.dp), tint = NeoLime)
+                                else -> Icon(Icons.Default.Language, null, Modifier.size(16.dp), tint = NeoLime)
+                            }
                         },
                         trailingIcon = {
-                            IconButton(onClick = navigate) { Icon(Icons.AutoMirrored.Filled.ArrowForward, "Go", tint = NeoLime) }
+                            IconButton(onClick = { focusManager.clearFocus(); open(session.address) }) {
+                                Icon(if (externalMode) Icons.AutoMirrored.Filled.OpenInNew else Icons.AutoMirrored.Filled.ArrowForward, "Go", tint = NeoLime)
+                            }
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                        keyboardActions = KeyboardActions(onGo = { navigate() }),
+                        keyboardActions = KeyboardActions(onGo = { focusManager.clearFocus(); open(session.address) }),
                         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = NeoLime, unfocusedBorderColor = borderColor),
                     )
-                    Spacer(Modifier.width(6.dp))
-                    IconButton(onClick = { session.webView?.reload() }, modifier = Modifier.size(40.dp).border(1.5.dp, borderColor, RoundedCornerShape(8.dp))) {
-                        Icon(Icons.Default.Refresh, "Reload", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurface)
+                    if (!externalMode) {
+                        NavButton(Icons.Default.Refresh, "Reload", enabled = session.activeUrl != null, borderColor = borderColor) {
+                            session.loadError = null
+                            session.webView?.reload()
+                        }
                     }
                 }
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    ToolChip("Inspect", Icons.Default.NearMe, active = session.tool == BrowserTool.INSPECT) {
-                        session.tool = if (session.tool == BrowserTool.INSPECT) BrowserTool.NONE else BrowserTool.INSPECT
-                        session.currentTab = BrowserInspectorTab.PREVIEW
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ModeToggle(openMode, borderColor) { setMode(it) }
+                    ToolChip("Open in browser", Icons.AutoMirrored.Filled.OpenInNew, active = externalMode) {
+                        openExternal(session.activeUrl ?: session.address.ifBlank { liveUrl.orEmpty() })
                     }
-                    ToolChip("Draw", Icons.Default.Brush, active = session.tool == BrowserTool.DRAW) {
-                        session.tool = if (session.tool == BrowserTool.DRAW) BrowserTool.NONE else BrowserTool.DRAW
-                        session.currentTab = BrowserInspectorTab.PREVIEW
-                    }
-                    ToolChip("Send page", Icons.Default.Send, active = false) { pushPayload = pageSnapshot() }
-                    ToolChip("Copy page", Icons.Default.ContentCopy, active = false) {
-                        copyToClipboard(context, "Page context", pageSnapshot().context)
+                    if (!externalMode && session.activeUrl != null) {
+                        ToolChip("Inspect", Icons.Default.NearMe, active = session.tool == BrowserTool.INSPECT) {
+                            session.tool = if (session.tool == BrowserTool.INSPECT) BrowserTool.NONE else BrowserTool.INSPECT
+                            session.currentTab = BrowserInspectorTab.PREVIEW
+                        }
+                        ToolChip("Draw", Icons.Default.Brush, active = session.tool == BrowserTool.DRAW) {
+                            session.tool = if (session.tool == BrowserTool.DRAW) BrowserTool.NONE else BrowserTool.DRAW
+                            session.currentTab = BrowserInspectorTab.PREVIEW
+                        }
+                        ToolChip("Send page", Icons.Default.Send, active = false) { pushPayload = pageSnapshot() }
+                        ToolChip("Copy page", Icons.Default.ContentCopy, active = false) {
+                            copyToClipboard(context, "Page context", pageSnapshot().context)
+                        }
                     }
                 }
             }
         }
+        if (!externalMode && session.isLoading && session.activeUrl != null) {
+            LinearProgressIndicator(
+                progress = (session.progress.coerceIn(5, 100)) / 100f,
+                modifier = Modifier.fillMaxWidth().height(3.dp),
+                color = NeoLime,
+                trackColor = Color.Transparent,
+            )
+        }
 
-        // ---- Tabs ----
+        if (externalMode) {
+            ExternalModePanel(
+                liveUrl = liveUrl,
+                lastUrl = session.address.takeIf { it.isNotBlank() },
+                borderColor = borderColor,
+                onOpen = { openExternal(it) },
+                onCopy = { copyToClipboard(context, "URL", it) },
+                onPreviewHere = { target -> setMode(BrowserOpenMode.IN_APP); load(normalizeUrl(target)) },
+                onQuickPort = { port -> open("http://127.0.0.1:$port/") },
+            )
+            return@Column
+        }
+
+        // ---- Tabs (only meaningful once a page is open) ----
         val errorCount = session.consoleLogs.count { it.level == ConsoleLogLevel.ERROR }
         val failedCount = session.networkRequests.count { it.failed }
-        ScrollableTabRow(
+        if (session.activeUrl != null) ScrollableTabRow(
             selectedTabIndex = session.currentTab.ordinal,
             containerColor = MaterialTheme.colorScheme.surface,
             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -290,27 +381,32 @@ fun BrowserInspectionScreen(
             }
         }
 
-        // ---- Body: the WebView stays attached; other tabs cover it ----
-        Box(Modifier.fillMaxSize()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx -> session.obtainWebView(ctx) { wrapped -> createInspectorWebView(wrapped, session, bridge) } },
-            )
+        // ---- Body: the WebView stays attached while a page is open; other tabs cover it ----
+        // Mounted only with a page, clipped to its slot and released on dispose so a stale
+        // native view can never paint over the toolbar (the old blank white block).
+        Box(Modifier.fillMaxSize().clipToBounds().background(MaterialTheme.colorScheme.background)) {
+            if (session.activeUrl != null) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize().clipToBounds(),
+                    factory = { ctx -> session.obtainWebView(ctx) { wrapped -> createInspectorWebView(wrapped, session, bridge) } },
+                    onRelease = { session.detachWebView() },
+                )
+            }
 
             if (session.activeUrl == null) {
-                Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-                    Column(Modifier.fillMaxSize().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Icon(Icons.Default.Language, null, Modifier.size(40.dp), tint = NeoLime)
-                        Spacer(Modifier.height(12.dp))
-                        Text("No dev server running", fontWeight = FontWeight.Black, fontSize = 16.sp)
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            "Start one in the Terminal or ask an agent (e.g. npm run dev). It opens here automatically, or type a URL above.",
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
+                NoServerPanel(
+                    liveUrl = liveUrl,
+                    borderColor = borderColor,
+                    onOpenLive = { open(it) },
+                    onQuickPort = { port -> open("http://127.0.0.1:$port/") },
+                )
+            } else if (session.loadError != null && session.currentTab == BrowserInspectorTab.PREVIEW) {
+                LoadErrorPanel(
+                    url = pageUrl,
+                    error = session.loadError.orEmpty(),
+                    onRetry = { session.loadError = null; session.webView?.reload() },
+                    onExternal = { openExternal(pageUrl) },
+                )
             } else if (session.currentTab == BrowserInspectorTab.PREVIEW) {
                 if (session.tool == BrowserTool.DRAW) {
                     DrawOverlay(session.strokes, drawColor, strokeWidth)
@@ -412,11 +508,17 @@ fun BrowserInspectionScreen(
 private fun createInspectorWebView(context: android.content.Context, session: BrowserSession, bridge: BrowserInspectorBridge): WebView =
     WebView(context).apply {
         layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        // Dark until the page paints, instead of a white flash/block.
+        setBackgroundColor(android.graphics.Color.parseColor("#141414"))
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
+        settings.builtInZoomControls = true
+        settings.displayZoomControls = false
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         addJavascriptInterface(bridge, BrowserInspectorBridge.INTERFACE_NAME)
         // Document-start injection sees requests made before the page finishes loading.
         val documentStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
@@ -425,7 +527,12 @@ private fun createInspectorWebView(context: android.content.Context, session: Br
         }
         webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                session.progress = newProgress
                 session.isLoading = newProgress < 100
+            }
+
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                session.pageTitle = title.orEmpty()
             }
 
             override fun onConsoleMessage(message: ConsoleMessage): Boolean {
@@ -450,22 +557,29 @@ private fun createInspectorWebView(context: android.content.Context, session: Br
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 session.isLoading = true
+                // A fresh navigation (link, back/forward, reload) supersedes the last failure;
+                // onReceivedError for this load, if any, arrives after this callback.
+                session.loadError = null
                 url?.let { session.address = it }
             }
 
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 session.canGoBack = view?.canGoBack() == true
+                session.canGoForward = view?.canGoForward() == true
+                url?.let { session.activeUrl = it }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 session.isLoading = false
                 session.canGoBack = view?.canGoBack() == true
+                session.canGoForward = view?.canGoForward() == true
                 if (!documentStart) view?.evaluateJavascript(BrowserInspectorBridge.INJECTION_SCRIPT, null)
                 view?.evaluateJavascript(BrowserInspectorBridge.setInspectModeScript(session.tool == BrowserTool.INSPECT), null)
             }
 
             override fun onReceivedError(view: WebView?, request: android.webkit.WebResourceRequest?, error: android.webkit.WebResourceError?) {
                 if (request?.isForMainFrame == true) {
+                    session.loadError = error?.description?.toString()?.ifBlank { null } ?: "Page failed to load"
                     session.addNetwork(
                         NetworkRequestEntry(
                             method = request.method ?: "GET",
@@ -852,7 +966,7 @@ private fun KeyValue(key: String, value: String) {
     }
 }
 
-private fun normalizeUrl(raw: String): String {
+internal fun normalizeUrl(raw: String): String {
     val trimmed = raw.trim()
     if (trimmed.isEmpty()) return ""
     return when {
@@ -861,4 +975,227 @@ private fun normalizeUrl(raw: String): String {
         trimmed.contains(":") -> "http://$trimmed"
         else -> "https://$trimmed"
     }
+}
+
+/** Where previews open: the built-in inspector WebView or the user's default browser app. */
+enum class BrowserOpenMode(val label: String) {
+    IN_APP("In-app"),
+    EXTERNAL("External");
+
+    companion object {
+        private const val PREFS = "pocket_preferences"
+        private const val KEY = "browser_open_mode"
+
+        fun load(context: Context): BrowserOpenMode =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
+                ?.let { saved -> entries.firstOrNull { it.name == saved } } ?: IN_APP
+
+        fun save(context: Context, mode: BrowserOpenMode) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, mode.name).apply()
+        }
+    }
+}
+
+/** Ports offered as one-tap shortcuts when nothing was detected. */
+private val QuickPorts = listOf(3000, 5173, 8080, 4200, 8000, 5000)
+
+@Composable
+private fun NavButton(icon: ImageVector, description: String, enabled: Boolean, borderColor: Color, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        Modifier.size(40.dp).clip(shape)
+            .border(1.5.dp, if (enabled) borderColor else borderColor.copy(alpha = 0.35f), shape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            description,
+            Modifier.size(18.dp),
+            tint = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+        )
+    }
+}
+
+/** Two-segment pill switching between the built-in preview and an external browser. */
+@Composable
+private fun ModeToggle(mode: BrowserOpenMode, borderColor: Color, onChange: (BrowserOpenMode) -> Unit) {
+    val shape = RoundedCornerShape(8.dp)
+    Row(Modifier.clip(shape).border(1.5.dp, borderColor, shape)) {
+        BrowserOpenMode.entries.forEach { option ->
+            val selected = option == mode
+            Row(
+                Modifier.background(if (selected) NeoLime else Color.Transparent)
+                    .clickable { onChange(option) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Icon(
+                    if (option == BrowserOpenMode.IN_APP) Icons.Default.Web else Icons.AutoMirrored.Filled.OpenInNew,
+                    null,
+                    Modifier.size(14.dp),
+                    tint = if (selected) NeoBlack else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(option.label, fontSize = 11.sp, fontWeight = FontWeight.Black, color = if (selected) NeoBlack else MaterialTheme.colorScheme.onSurface)
+            }
+        }
+    }
+}
+
+@Composable
+private fun BigAction(label: String, icon: ImageVector, primary: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        modifier.clip(shape)
+            .background(if (primary) NeoLime else MaterialTheme.colorScheme.surface)
+            .border(1.5.dp, NeoBlack, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+    ) {
+        Icon(icon, null, Modifier.size(18.dp), tint = if (primary) NeoBlack else MaterialTheme.colorScheme.onSurface)
+        Text(label, fontSize = 13.sp, fontWeight = FontWeight.Black, color = if (primary) NeoBlack else MaterialTheme.colorScheme.onSurface)
+    }
+}
+
+@Composable
+private fun QuickPortRow(onQuickPort: (Int) -> Unit) {
+    Text("Or try a common port", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        QuickPorts.forEach { port -> FilterChip(":$port", selected = false) { onQuickPort(port) } }
+    }
+}
+
+@Composable
+private fun StatusPill(live: Boolean, text: String) {
+    val color = if (live) NeoLime else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).border(1.dp, color.copy(alpha = 0.6f), RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+        Text(text, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Shown in the in-app mode before any page is open. */
+@Composable
+private fun NoServerPanel(liveUrl: String?, borderColor: Color, onOpenLive: (String) -> Unit, onQuickPort: (Int) -> Unit) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+    ) {
+        Icon(Icons.Default.Language, null, Modifier.size(44.dp), tint = NeoLime)
+        if (liveUrl != null) {
+            StatusPill(live = true, text = "Dev server live · ${liveUrl.removePrefix("http://")}")
+            Text("Your app is running", fontWeight = FontWeight.Black, fontSize = 18.sp)
+            BigAction("Open preview", Icons.Default.PlayArrow, primary = true, modifier = Modifier.fillMaxWidth()) { onOpenLive(liveUrl) }
+        } else {
+            StatusPill(live = false, text = "Watching for a dev server…")
+            Text("No dev server running", fontWeight = FontWeight.Black, fontSize = 18.sp)
+            Text(
+                "Start one in the Terminal or ask an agent (e.g. npm run dev). It opens here automatically, or type a URL above.",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+        HorizontalDivider(color = borderColor.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 4.dp))
+        QuickPortRow(onQuickPort)
+        Text(
+            "Prefer Chrome DevTools or your own browser? Switch to External above.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/** External mode: no embedded WebView, just a launcher for the system browser. */
+@Composable
+private fun ExternalModePanel(
+    liveUrl: String?,
+    lastUrl: String?,
+    borderColor: Color,
+    onOpen: (String) -> Unit,
+    onCopy: (String) -> Unit,
+    onPreviewHere: (String) -> Unit,
+    onQuickPort: (Int) -> Unit,
+) {
+    val target = liveUrl ?: lastUrl
+    Column(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).verticalScroll(rememberScrollState()).padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+    ) {
+        Icon(Icons.AutoMirrored.Filled.OpenInNew, null, Modifier.size(44.dp), tint = NeoLime)
+        StatusPill(
+            live = liveUrl != null,
+            text = if (liveUrl != null) "Dev server live · ${liveUrl.removePrefix("http://")}" else "Watching for a dev server…",
+        )
+        Text("Open in your browser", fontWeight = FontWeight.Black, fontSize = 18.sp)
+        Text(
+            "Pages open in your default browser app. The server runs on this phone, so 127.0.0.1 works there too.",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        if (target != null) {
+            Text(
+                target,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, borderColor, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+            BigAction("Open in browser", Icons.AutoMirrored.Filled.OpenInNew, primary = true, modifier = Modifier.fillMaxWidth()) { onOpen(target) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                BigAction("Copy URL", Icons.Default.ContentCopy, primary = false, modifier = Modifier.weight(1f)) { onCopy(target) }
+                BigAction("Preview here", Icons.Default.Web, primary = false, modifier = Modifier.weight(1f)) { onPreviewHere(target) }
+            }
+        }
+        HorizontalDivider(color = borderColor.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 4.dp))
+        QuickPortRow(onQuickPort)
+    }
+}
+
+/** Main-frame failure, e.g. the dev server stopped or the port is wrong. */
+@Composable
+private fun LoadErrorPanel(url: String, error: String, onRetry: () -> Unit, onExternal: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+    ) {
+        Icon(Icons.Default.CloudOff, null, Modifier.size(44.dp), tint = ErrorRed)
+        Text("Can't reach this page", fontWeight = FontWeight.Black, fontSize = 18.sp)
+        Text(url, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(
+            friendlyError(error),
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            BigAction("Retry", Icons.Default.Refresh, primary = true, modifier = Modifier.weight(1f), onClick = onRetry)
+            BigAction("External", Icons.AutoMirrored.Filled.OpenInNew, primary = false, modifier = Modifier.weight(1f), onClick = onExternal)
+        }
+    }
+}
+
+internal fun friendlyError(raw: String): String = when {
+    raw.contains("CONNECTION_REFUSED", true) -> "Nothing is listening on that port. Is the dev server still running?"
+    raw.contains("CLEARTEXT", true) -> "Plain http is only allowed for localhost here. Use https or open it externally."
+    raw.contains("NAME_NOT_RESOLVED", true) -> "That address couldn't be found. Check the URL and your connection."
+    raw.contains("TIMED_OUT", true) -> "The server took too long to respond."
+    raw.contains("INTERNET_DISCONNECTED", true) -> "You're offline."
+    else -> raw
 }
