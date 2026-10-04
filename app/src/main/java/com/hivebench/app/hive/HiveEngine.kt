@@ -641,7 +641,9 @@ class HiveEngine(
 
     fun update(agentId: String, transform: (HiveAgent) -> HiveAgent) = act { s ->
         val before = agents.firstOrNull { it.id == agentId } ?: return@act
-        val after = transform(before).copy(id = before.id, isGod = before.isGod, sessionId = before.sessionId)
+        var after = transform(before).copy(id = before.id, isGod = before.isGod, sessionId = before.sessionId)
+        // Switching CLI starts a fresh session on the new tool so it gets seeded with the hive protocol.
+        if (after.cli != before.cli) after = after.copy(launched = false)
         agents = agents.map { if (it.id == agentId) after else it }
         s.saveAgents(agents)
         agents.forEach { s.ensureAgentLayout(it, agents) }
@@ -652,6 +654,19 @@ class HiveEngine(
         }
         if (after.onHold != before.onHold) s.log("agent-hold", "${after.name} ${if (after.onHold) "on hold (1:1 with you)" else "back on the floor"}", to = agentId)
         if (after.capabilities != before.capabilities) s.log("capabilities", "${after.name}: ${after.capabilities.bundle ?: "custom"} — restart to apply", to = agentId)
+        if (after.cli != before.cli) s.log("agent-cli", "${after.name} switched ${before.cli.title} to ${after.cli.title}, restart to apply", to = agentId)
+    }
+
+    /** Switches an agent's CLI/model (the orchestrator included) in one locked step, optionally restarting it. */
+    fun switchCli(agentId: String, cli: AgentKind, model: String, restart: Boolean) = act { s ->
+        val before = agents.firstOrNull { it.id == agentId } ?: return@act
+        val changedCli = before.cli != cli
+        val after = before.copy(cli = cli, model = model.trim(), launched = if (changedCli) false else before.launched)
+        agents = agents.map { if (it.id == agentId) after else it }
+        s.saveAgents(agents)
+        agents.forEach { s.ensureAgentLayout(it, agents) }
+        if (changedCli) s.log("agent-cli", "${after.name} switched ${before.cli.title} to ${cli.title}", to = agentId)
+        if (restart) startLocked(s, after)
     }
 
     /** Grants a role bundle in a single write (role, skills, connections, MCP servers). */
@@ -723,6 +738,9 @@ class HiveEngine(
             s.saveAgents(agents)
         }
         when {
+            agent.isGod && !resume && agent.cli != AgentKind.CLAUDE_CODE ->
+                // No --append-system-prompt on other CLIs: seed the god role + protocol as the first turn.
+                enqueueLocked(s, QueuedSend(UUID.randomUUID().toString(), agent.id, HiveTemplates.injectedPrompt(agent, root, godName()) + "\n\n" + HiveTemplates.godOrientation(godName()), System.currentTimeMillis(), origin = "boot"))
             agent.isGod && !resume -> enqueueLocked(s, QueuedSend(UUID.randomUUID().toString(), agent.id, HiveTemplates.godOrientation(godName()), System.currentTimeMillis(), origin = "boot"))
             agent.cli != AgentKind.CLAUDE_CODE && !agent.launched ->
                 enqueueLocked(s, QueuedSend(UUID.randomUUID().toString(), agent.id, HiveTemplates.seedPrompt(agent, root, godName()), System.currentTimeMillis(), origin = "boot"))

@@ -266,6 +266,20 @@ private fun RoomControls(hive: HiveSnapshot, agent: HiveAgent, live: Boolean, vi
             ToggleRow("Paused", "Its tool calls are denied until you resume", agent.paused) { on -> viewModel.hive.update(agent.id) { it.copy(paused = on) } }
             if (!agent.isGod) ToggleRow("On hold", "1:1 with you — the orchestrator won't dispatch to it", agent.onHold) { on -> viewModel.hive.update(agent.id) { it.copy(onHold = on) } }
             ToggleRow("Pause auto-delivery", "Queued messages wait until you press send now", agent.autoDeliveryPaused) { on -> viewModel.hive.update(agent.id) { it.copy(autoDeliveryPaused = on) } }
+            // Agent CLI (Claude Code, JCode, Codex, ...). Works for the orchestrator too.
+            val appState by viewModel.state.collectAsState()
+            val installed = AgentKind.entries.filter { it == AgentKind.CUSTOM_RUNNER || it == agent.cli || appState.installedAgentVersions.containsKey(it) }
+            var cli by remember(agent.id, agent.cli) { mutableStateOf(agent.cli) }
+            var model by remember(agent.id, agent.model) { mutableStateOf(agent.model) }
+            Text("CLI", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            ChipRow { installed.forEach { k -> Chip(k.title, cli == k) { cli = k } } }
+            if (cli != AgentKind.CLAUDE_CODE) Muted("Claude Code gets the full hive wiring (hooks, status, spend, steer). Other CLIs get the protocol as a first prompt and inbox work orders.")
+            OutlinedTextField(model, { model = it }, Modifier.fillMaxWidth(), label = { Text("Model (optional)") }, singleLine = true)
+            if (cli != agent.cli || model.trim() != agent.model) {
+                SmallBtn(if (live) "Save CLI & restart" else "Save CLI", primary = true) {
+                    viewModel.hive.switchCli(agent.id, cli, model, restart = live)
+                }
+            }
             OutlinedTextField(goal, { goal = it }, Modifier.fillMaxWidth(), label = { Text("Standing goal") }, minLines = 2)
             OutlinedTextField(
                 cap, { cap = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("Token cap (thousands, empty = none)") }, singleLine = true,
