@@ -106,7 +106,9 @@ object AgentCatalog {
             apiKeys = listOf(anthropicKey),
             usageCommand = "/usage",
             quickActions = listOf(cmd("/model"), cmd("/usage"), cmd("/compact"), cmd("/clear"), cmd("/resume"), cmd("/help")),
-            environment = mapOf("DISABLE_AUTOUPDATER" to "1"),
+            // PRoot's fake root (-0) makes Claude see uid 0, where it refuses --dangerously-skip-permissions
+            // unless told it is sandboxed. The guest is an app-private rootfs, so it is.
+            environment = mapOf("DISABLE_AUTOUPDATER" to "1", "IS_SANDBOX" to "1"),
         ),
         AgentSpec(
             kind = AgentKind.CODEX,

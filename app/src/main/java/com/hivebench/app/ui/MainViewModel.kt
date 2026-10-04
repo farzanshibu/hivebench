@@ -1053,7 +1053,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun jcodeRuntimeEnv(owner: String): Map<String, String> {
         val id = java.security.MessageDigest.getInstance("SHA-1").digest(owner.toByteArray())
             .take(5).joinToString("") { "%02x".format(it) }
-        return mapOf("JCODE_RUNTIME_DIR" to "/tmp/jr/$id")
+        val dir = "/tmp/jr/$id"
+        // JCode exits with "No such file or directory" unless its runtime dir already exists.
+        installer.guestFile(dir).mkdirs()
+        return mapOf("JCODE_RUNTIME_DIR" to dir)
     }
 
     // ---- Multi-agent office (hive) --------------------------------------------------
